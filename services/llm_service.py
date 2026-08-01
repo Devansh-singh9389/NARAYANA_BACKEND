@@ -24,8 +24,9 @@ def generate_core_story(topic: str, genre: str = "General") -> dict:
     system_prompt = """You are an expert comic book Director and ComfyUI Prompt Engineer. 
         Take the provided story and break it down exactly into scenes.
         Ensure characters are assigned stable IDs (e.g., 'char_arthur').
+        CRITICAL: If a character ages significantly due to a time skip, create a completely new character entry in the characters array (e.g., 'char_lily_child' and 'char_lily_adult').
         To prevent realism and maintain a graphic novel aesthetic, ensure the StyleConfig heavily penalizes 3D and realism in the negative_prompt, and enforces '2d, flat colors, comic book style, heavy inking' in the art_style.
-        Every scene MUST explicitly list the characters_present by ID and include Danbooru tags for location, time, camera, and emotion."""
+        Every scene MUST explicitly list the characters_present by ID and include Danbooru tags for location, time, camera, emotion, and visual."""
 
     prompt = f"Topic: {topic}\nGenre: {genre}"
 

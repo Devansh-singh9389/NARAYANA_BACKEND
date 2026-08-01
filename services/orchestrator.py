@@ -24,7 +24,7 @@ def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> s
     characters_present = scene.get("characters_present", [])
     raw_overrides = scene.get("costume_overrides", [])
 
-    # --- THE FIX: Convert the list of objects back into a simple lookup dictionary ---
+    # Convert the list of objects back into a simple lookup dictionary
     override_dict = {item["character_id"]: item["tags"] for item in raw_overrides if "character_id" in item}
 
     for char_id in characters_present:
@@ -51,6 +51,7 @@ def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> s
     clean_parts = [part.strip() for part in prompt_parts if part and part.strip()]
     return ", ".join(clean_parts)
 
+
 async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 3) -> dict:
     print(f"\n=== [ORCHESTRATOR] STARTING COMIC GENERATION ===")
 
@@ -64,7 +65,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         core_story = generate_core_story(topic=prompt, genre="General")
     else:
         print("[1/3] Mode is 'story'. Bypassing generation and using User's custom script...")
-        # We package the user's raw text into the exact format Stage 2 expects!
+        # We package the user's raw text into the exact format Stage 2 expects
         core_story = {
             "title": "Custom Story",
             "synopsis": "A custom story written by the user.",
@@ -79,15 +80,21 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
     style_config = extracted_data.get("style_config", {})
     scenes = extracted_data.get("scenes", [])
 
-    # 3. PREPARE THE INITIAL STATE (Images are empty for now)
+    # 3. PREPARE THE INITIAL STATE (Preserving all rich metadata)
     frontend_scenes = []
     for scene in scenes:
-        frontend_scenes.append({
-            "id": scene.get("scene_number"),
-            "narration": scene.get("narration", ""),
-            "dialogues": scene.get("dialogues", []),
-            "imageUrl": None  # Image not generated yet!
-        })
+        scene_data = scene.copy()
+
+        # Rename 'scene_number' to 'id' for the frontend
+        if "scene_number" in scene_data:
+            scene_data["id"] = scene_data.pop("scene_number")
+
+        scene_data["imageUrl"] = None
+
+        # Save the exact prompt we are sending to ComfyUI for debugging!
+        scene_data["imagePrompt"] = build_runtime_prompt(scene, characters, style_config)
+
+        frontend_scenes.append(scene_data)
 
     comic_record = {
         "id": comic_id,
@@ -95,7 +102,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         "date": datetime.now().strftime("%B %d, %Y"),
         "mode": "Story Mode",
         "thumbnail": "",
-        "status": "generating",  # <--- Flags to the frontend that it's still working
+        "status": "generating",  # Flags to the frontend that it's still working
         "isRead": False,
         "progress": 10,  # Give it 10% progress for finishing the story
         "synopsis": core_story.get("synopsis", ""),
@@ -115,7 +122,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
     # 5. LOOP THROUGH COMFYUI
     print(f"[3/3] Generating {len(scenes)} Images on local GPU...")
     for index, scene in enumerate(scenes):
-        scene_num = scene.get("scene_number")
+        scene_num = scene.get("scene_number", scene.get("id"))
         print(f"  -> Rendering Panel {scene_num}...")
 
         final_prompt = build_runtime_prompt(scene, characters, style_config)
