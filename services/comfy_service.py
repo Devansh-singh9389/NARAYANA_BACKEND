@@ -27,10 +27,10 @@ def find_positive_prompt_node_id(workflow: dict) -> str:
     raise ValueError("Could not find a valid positive prompt node.")
 
 
-async def generate_image_from_comfy(prompt_text: str, comic_id: str, scene_num: int) -> str:
+async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: str) -> str:
     """
     Commands ComfyUI to generate an image, then downloads it directly into
-    our backend's static folder neatly organized by comic_id and scene_num.
+    our backend's static folder neatly organized by comic_id and filename.
     """
     if not os.path.exists(WORKFLOW_PATH):
         raise FileNotFoundError(f"Workflow file not found at {WORKFLOW_PATH}")
@@ -93,19 +93,16 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, scene_num: 
     if img_response.status_code != 200:
         raise Exception("Failed to retrieve the generated image from ComfyUI.")
 
-    # --- THE MAGIC HAPPENS HERE ---
-    # Create a specific folder for this comic (e.g., static/outputs/comic-12345/)
+    # --- SAVE WITH CUSTOM FILENAME ---
     comic_dir = os.path.join(OUTPUT_DIR, comic_id)
     os.makedirs(comic_dir, exist_ok=True)
 
-    # Name the file exactly after the scene (e.g., scene_1.png)
-    local_image_name = f"scene_{scene_num}.png"
-    local_image_path = os.path.join(comic_dir, local_image_name)
+    local_image_path = os.path.join(comic_dir, filename)
 
     with open(local_image_path, "wb") as f:
         f.write(img_response.content)
 
-    print(f"[ComfyUI Service] Image downloaded & saved to backend: {local_image_path}")
+    print(f"[ComfyUI] Saved image to {local_image_path}")
 
-    # Return the clean, predictable HTTP path for your React frontend
-    return f"/static/outputs/{comic_id}/{local_image_name}"
+    # Return the relative URL for the frontend
+    return f"/static/outputs/{comic_id}/{filename}"

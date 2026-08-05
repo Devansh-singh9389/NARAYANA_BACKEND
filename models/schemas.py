@@ -55,8 +55,9 @@ class Dialogue(BaseModel):
 
 #for gemini api work perfectly
 class CostumeOverride(BaseModel):
-    character_id: str = Field(..., description="The ID of the character (e.g., 'char_arthur')")
-    tags: str = Field(..., description="Danbooru tags for their temporary outfit")
+    character_id: str = Field(..., description="The ID of the character")
+    body_override: Optional[str] = Field(default=None, description="Optional replacement for base_body_tags (e.g. for time-skips like adulthood)")
+    tags: str = Field(..., description="Danbooru tags for their outfit/costume")
 
 
 class SceneExtraction(BaseModel):

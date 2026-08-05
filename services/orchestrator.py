@@ -1,49 +1,47 @@
 import os
 import json
 import uuid
+import shutil
+import asyncio
 from datetime import datetime
 
-# Import our custom services
 from services.llm_service import generate_core_story, extract_story_data
 from services.comfy_service import generate_image_from_comfy
 
 
 def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> str:
-    """
-    (9.8/10 Architecture) Assembles the final ComfyUI prompt using strict, explicit scene states.
-    """
     prompt_parts = []
-
-    # 1. Add Explicit Composition Constraints
     prompt_parts.append(scene.get("camera", ""))
     prompt_parts.append(scene.get("location", ""))
     prompt_parts.append(scene.get("time", ""))
     prompt_parts.append(scene.get("emotion", ""))
 
-    # 2. Inject Characters Explicitly
     characters_present = scene.get("characters_present", [])
     raw_overrides = scene.get("costume_overrides", [])
 
-    # Convert the list of objects back into a simple lookup dictionary
-    override_dict = {item["character_id"]: item["tags"] for item in raw_overrides if "character_id" in item}
+    override_dict = {}
+    for item in raw_overrides:
+        if "character_id" in item:
+            override_dict[item["character_id"]] = {
+                "body": item.get("body_override"),
+                "tags": item.get("tags", "")
+            }
 
     for char_id in characters_present:
         char_data = next((c for c in characters if c.get("id") == char_id), None)
-
         if char_data:
-            prompt_parts.append(char_data.get("base_body_tags", ""))
-            prompt_parts.append(char_data.get("distinctive_features", ""))
+            if char_id in override_dict and override_dict[char_id]["body"]:
+                prompt_parts.append(override_dict[char_id]["body"])
+            else:
+                prompt_parts.append(char_data.get("base_body_tags", ""))
+                prompt_parts.append(char_data.get("distinctive_features", ""))
 
-            # Check our new override_dict
             if char_id in override_dict:
-                prompt_parts.append(override_dict[char_id])
+                prompt_parts.append(override_dict[char_id]["tags"])
             else:
                 prompt_parts.append(char_data.get("default_outfit_tags", ""))
 
-    # 3. Add Scene Actions
     prompt_parts.append(scene.get("action_tags", ""))
-
-    # 4. Add Global Atmosphere & Flat 2D Comic Style
     prompt_parts.append(style_config.get("lighting_and_atmosphere", ""))
     prompt_parts.append(style_config.get("color_palette", ""))
     prompt_parts.append(style_config.get("art_style", ""))
@@ -52,126 +50,242 @@ def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> s
     return ", ".join(clean_parts)
 
 
-async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 3) -> dict:
+async def regenerate_thumbnail_task(comic_id: str):
+    """Standalone task to recreate a thumbnail without touching the scenes."""
+    print(f"\n=== [ORCHESTRATOR] REGENERATING THUMBNAIL FOR {comic_id} ===")
+    story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
+
+    try:
+        with open(story_file_path, "r", encoding="utf-8") as f:
+            comic_record = json.load(f)
+
+        concept = comic_record.get("thumbnail_concept", comic_record.get("synopsis", "epic comic scene"))
+        title = comic_record.get("title", "Comic")
+
+        prompt = f"comic book cover art, Title: {title}, {concept}, masterpiece, highly detailed, dramatic lighting, vibrant, graphic novel cover"
+
+        # Generate image via ComfyUI
+        image_url = await generate_image_from_comfy(prompt, comic_id, "thumbnail.png")
+
+        # Save to DB and mark completed
+        comic_record["thumbnail"] = image_url
+        comic_record["thumbnail_status"] = "completed"  # <-- MARK COMPLETED
+
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(comic_record, f, indent=4)
+
+        print(f"[Orchestrator] Thumbnail regenerated successfully!")
+
+    except Exception as e:
+        print(f"[ORCHESTRATOR ERROR] Failed to regenerate thumbnail: {str(e)}")
+        # Reset status if it failed
+        if os.path.exists(story_file_path):
+            with open(story_file_path, "r", encoding="utf-8") as f:
+                comic_record = json.load(f)
+            comic_record["thumbnail_status"] = "failed"
+            with open(story_file_path, "w", encoding="utf-8") as f:
+                json.dump(comic_record, f, indent=4)
+
+
+async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, comic_id: str = None) -> dict:
+    """The master generation function. Now runs safely in the background with thread safety."""
     print(f"\n=== [ORCHESTRATOR] STARTING COMIC GENERATION ===")
 
-    # 1. Generate the Comic ID FIRST
-    comic_id = f"comic-{uuid.uuid4().hex[:8]}"
-    print(f"Assigning ID: {comic_id}")
+    if not comic_id:
+        comic_id = f"comic-{uuid.uuid4().hex[:8]}"
 
-    # 2. RUN LLM STAGES (The Bypass Logic)
-    if mode == "topic":
-        print("[1/3] Mode is 'topic'. Generating Core Story via Gemini...")
-        core_story = generate_core_story(topic=prompt, genre="General")
-    else:
-        print("[1/3] Mode is 'story'. Bypassing generation and using User's custom script...")
-        # We package the user's raw text into the exact format Stage 2 expects
-        core_story = {
-            "title": "Custom Story",
-            "synopsis": "A custom story written by the user.",
-            "thumbnail_concept": "A dramatic comic book cover reflecting the story.",
-            "full_story": prompt  # The user's pasted text goes directly here
-        }
+    story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
 
-    print("[2/3] Extracting Scene Logic and Character Sheets...")
-    # Stage 2 doesn't care who wrote the story, it just extracts the tags!
-    extracted_data = extract_story_data(core_story, num_scenes)
-    characters = extracted_data.get("characters", [])
-    style_config = extracted_data.get("style_config", {})
-    scenes = extracted_data.get("scenes", [])
+    # Load the placeholder state we instantly created in routes.py
+    try:
+        with open(story_file_path, "r", encoding="utf-8") as f:
+            comic_record = json.load(f)
+    except Exception as e:
+        print(f"[ORCHESTRATOR ERROR] Failed to load placeholder: {e}")
+        return
 
-    # 3. PREPARE THE INITIAL STATE (Preserving all rich metadata)
-    frontend_scenes = []
-    for scene in scenes:
-        scene_data = scene.copy()
+    try:
+        # --- THE FIX 2: RUN SYNCHRONOUS LLM CALLS IN A BACKGROUND THREAD ---
+        if mode == "topic":
+            # This prevents the FastAPI server from freezing while Gemini writes!
+            core_story = await asyncio.to_thread(generate_core_story, prompt, "General")
+        else:
+            core_story = {
+                "title": "Custom Story",
+                "synopsis": "A custom story written by the user.",
+                "thumbnail_concept": "A dramatic comic book cover reflecting the story.",
+                "full_story": prompt
+            }
 
-        # Rename 'scene_number' to 'id' for the frontend
-        if "scene_number" in scene_data:
-            scene_data["id"] = scene_data.pop("scene_number")
+        # Update progress to show stage 2 has started
+        comic_record["progress"] = 5
+        comic_record["title"] = core_story.get("title", "Untitled Comic")
+        comic_record["synopsis"] = core_story.get("synopsis", "")
+        comic_record["thumbnail_concept"] = core_story.get("thumbnail_concept", "epic comic book cover")
 
-        scene_data["imageUrl"] = None
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(comic_record, f, indent=4)
 
-        # Save the exact prompt we are sending to ComfyUI for debugging!
-        scene_data["imagePrompt"] = build_runtime_prompt(scene, characters, style_config)
+        # Again, run the synchronous Stage 2 extraction in a background thread
+        extracted_data = await asyncio.to_thread(extract_story_data, core_story, num_scenes)
 
-        frontend_scenes.append(scene_data)
+        characters = extracted_data.get("characters", [])
+        style_config = extracted_data.get("style_config", {})
+        scenes = extracted_data.get("scenes", [])
 
-    comic_record = {
-        "id": comic_id,
-        "title": core_story.get("title", "Untitled Comic"),
-        "date": datetime.now().strftime("%B %d, %Y"),
-        "mode": "Story Mode",
-        "thumbnail": "",
-        "status": "generating",  # Flags to the frontend that it's still working
-        "isRead": False,
-        "progress": 10,  # Give it 10% progress for finishing the story
-        "synopsis": core_story.get("synopsis", ""),
-        "characters": characters,
-        "scenes": frontend_scenes
-    }
+        frontend_scenes = []
+        for scene in scenes:
+            scene_data = scene.copy()
+            if "scene_number" in scene_data:
+                scene_data["id"] = scene_data.pop("scene_number")
 
-    # 4. SAVE THE FILE IMMEDIATELY BEFORE COMFYUI STARTS
-    comic_dir = os.path.join("static", "outputs", comic_id)
-    os.makedirs(comic_dir, exist_ok=True)
-    story_file_path = os.path.join(comic_dir, "story.json")
+            scene_data["imageUrl"] = None
+            scene_data["imagePrompt"] = build_runtime_prompt(scene, characters, style_config)
+            frontend_scenes.append(scene_data)
+
+        # UPDATE FILE WITH FULL STORY DATA BEFORE GPU LOOP
+        comic_record["progress"] = 10
+        comic_record["characters"] = characters
+        comic_record["scenes"] = frontend_scenes
+
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(comic_record, f, indent=4)
+
+        # BEGIN GPU LOOP
+        await run_gpu_render_loop(comic_record, story_file_path, comic_id)
+        return comic_record
+
+    except Exception as e:
+        print(f"\n[ORCHESTRATOR ERROR] {str(e)}")
+        comic_record["status"] = "failed"
+        comic_record["synopsis"] = f"Error during AI generation: {str(e)}"
+
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(comic_record, f, indent=4)
+
+        return comic_record
+
+
+async def resume_comic(comic_id: str):
+    """Bypasses the LLM and instantly restarts the GPU loop for missing images."""
+    story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
+    if not os.path.exists(story_file_path):
+        print(f"[Orchestrator] Error: Cannot resume, {comic_id} not found.")
+        return
+
+    with open(story_file_path, "r", encoding="utf-8") as f:
+        comic_record = json.load(f)
+
+    print(f"\n=== [ORCHESTRATOR] RESUMING COMIC: {comic_id} ===")
+    comic_record["status"] = "generating"
 
     with open(story_file_path, "w", encoding="utf-8") as f:
         json.dump(comic_record, f, indent=4)
-    print(f"[Orchestrator] Core Story safely saved to {story_file_path}. Starting GPU...")
 
-    # 5. LOOP THROUGH COMFYUI
-    print(f"[3/3] Generating {len(scenes)} Images on local GPU...")
+    # Resume the exact same loop!
+    await run_gpu_render_loop(comic_record, story_file_path, comic_id)
+
+
+async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id: str):
+    """The shared loop used by both Generate and Resume, featuring Pause & Delete detection."""
+    scenes = comic_record.get("scenes", [])
+
+    # --- 1. GENERATE COVER THUMBNAIL FIRST (if missing) ---
+    if not comic_record.get("thumbnail"):
+        try:
+            print(f"\n[GPU] Generating Cover Art / Thumbnail for {comic_id}...")
+            concept = comic_record.get("thumbnail_concept", comic_record.get("synopsis", "epic comic book scene"))
+            title = comic_record.get("title", "Comic")
+            thumb_prompt = f"comic book cover art, Title: {title}, {concept}, masterpiece, highly detailed, dramatic lighting, vibrant colors, graphic novel cover"
+
+            thumb_url = await generate_image_from_comfy(thumb_prompt, comic_id, "thumbnail.png")
+            comic_record["thumbnail"] = thumb_url
+
+            with open(story_file_path, "w", encoding="utf-8") as f:
+                json.dump(comic_record, f, indent=4)
+        except Exception as e:
+            print(f"[GPU Error] Thumbnail generation failed: {e}")
+
+    # --- 2. RENDER EACH SCENE ---
     for index, scene in enumerate(scenes):
-        scene_num = scene.get("scene_number", scene.get("id"))
-        print(f"  -> Rendering Panel {scene_num}...")
+        # 1. PRE-RENDER CHECK: Did the user pause or delete before we started?
+        try:
+            with open(story_file_path, "r", encoding="utf-8") as f:
+                live_state = json.load(f)
 
-        final_prompt = build_runtime_prompt(scene, characters, style_config)
+            if live_state.get("status") == "pause_requested":
+                print(f"[Orchestrator] Pause requested! Safely stopping {comic_id}.")
+                live_state["status"] = "paused"
+                with open(story_file_path, "w", encoding="utf-8") as f:
+                    json.dump(live_state, f, indent=4)
+                return  # Kill the loop safely!
+
+            elif live_state.get("status") == "delete_requested":
+                print(f"[Orchestrator] Delete requested! Wiping {comic_id} and stopping.")
+                shutil.rmtree(os.path.join("static", "outputs", comic_id), ignore_errors=True)
+                return  # Kill the loop and wipe the folder!
+
+        except FileNotFoundError:
+            return  # File was wiped manually, just exit
+
+        # Skip images that are already rendered
+        if scene.get("imageUrl"):
+            continue
+
+        scene_num = scene.get("id")
+        print(f"  -> Rendering Panel {scene_num}...")
+        final_prompt = scene.get("imagePrompt")
 
         try:
+            # Use the new filename parameter: "scene_<id>.png"
             image_url = await generate_image_from_comfy(
                 prompt_text=final_prompt,
                 comic_id=comic_id,
-                scene_num=scene_num
+                filename=f"scene_{scene_num}.png"   # <--- changed
             )
         except Exception as e:
             print(f"     [Error] Panel {scene_num} failed: {e}")
             image_url = None
 
-        # Inject the generated image URL into our scenes list
-        frontend_scenes[index]["imageUrl"] = image_url
-        print(f"  -> Panel {scene_num} complete: {image_url}")
+        # 2. POST-RENDER CHECK: Did the user hit Pause/Delete WHILE we were rendering?
+        try:
+            with open(story_file_path, "r", encoding="utf-8") as f:
+                post_state = json.load(f)
 
-        # PROGRESSIVE SAVE: Update the JSON file after EVERY image!
-        # This calculates exact progress percentage for React
-        current_progress = int(10 + ((index + 1) / len(scenes)) * 90)
-        comic_record["progress"] = current_progress
+            if post_state.get("status") == "delete_requested":
+                print(f"[Orchestrator] Delete caught post-render! Wiping {comic_id} permanently.")
+                shutil.rmtree(os.path.join("static", "outputs", comic_id), ignore_errors=True)
+                return
+
+            if post_state.get("status") == "pause_requested":
+                print(f"[Orchestrator] Pause caught post-render! Stopping {comic_id}.")
+                post_state["scenes"][index]["imageUrl"] = image_url
+                rendered_count = sum(1 for s in post_state["scenes"] if s.get("imageUrl"))
+                post_state["progress"] = int(10 + (rendered_count / len(scenes)) * 90)
+                post_state["status"] = "paused"
+                with open(story_file_path, "w", encoding="utf-8") as f:
+                    json.dump(post_state, f, indent=4)
+                return
+
+        except FileNotFoundError:
+            return
+
+        # 3. IF NO INTERRUPTIONS, SAVE NORMALLY
+        comic_record["scenes"][index]["imageUrl"] = image_url
+        print(f"  -> Panel {scene_num} complete.")
+
+        rendered_count = sum(1 for s in comic_record["scenes"] if s.get("imageUrl"))
+        comic_record["progress"] = int(10 + (rendered_count / len(scenes)) * 90)
 
         with open(story_file_path, "w", encoding="utf-8") as f:
             json.dump(comic_record, f, indent=4)
 
-    # 6. FINALIZE THE COMIC
+    # 4. FINALIZE THE COMIC
     comic_record["status"] = "completed"
     comic_record["progress"] = 100
-    if frontend_scenes and frontend_scenes[0].get("imageUrl"):
-        comic_record["thumbnail"] = frontend_scenes[0]["imageUrl"]
+    if scenes and scenes[0].get("imageUrl"):
+        comic_record["thumbnail"] = scenes[0]["imageUrl"]  # fallback if thumb missing
 
-    # Final Save
     with open(story_file_path, "w", encoding="utf-8") as f:
         json.dump(comic_record, f, indent=4)
-
-    print(f"=== [ORCHESTRATOR] GENERATION COMPLETE! Saved to static/outputs/{comic_id}/ ===\n")
-    return comic_record
-
-
-# --- Quick Test Block ---
-if __name__ == "__main__":
-    import asyncio
-
-
-    async def run_test():
-        test_topic = "A cyberpunk samurai fighting in the neon rain"
-        final_comic = await generate_full_comic(test_topic, num_scenes=2)
-        print(json.dumps(final_comic, indent=2))
-
-
-    asyncio.run(run_test())
+    print(f"=== [ORCHESTRATOR] JOB FINISHED! ===")

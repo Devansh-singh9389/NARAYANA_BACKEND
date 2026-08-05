@@ -1,65 +1,209 @@
-from fastapi import APIRouter, HTTPException
-from models.schemas import GenerateRequest, Comic, Scene
-from utils.file_manager import load_history, save_history
-from services.comfy_service import generate_image_from_comfy
-import time
+import os
+import json
+import uuid
+import os
+import json
+import uuid
+import shutil
+import glob
+from datetime import datetime
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+from pydantic import BaseModel, Field
+from typing import Optional
 
+# Import our master Orchestrator
+# Import the new function from orchestrator
+from services.orchestrator import generate_full_comic, resume_comic, regenerate_thumbnail_task
+
+# Create the router
 router = APIRouter()
 
-@router.get("/api/history")
-async def get_history():
-    return load_history()
 
-@router.delete("/api/history/{comic_id}")
-async def delete_story(comic_id: str):
-    history = load_history()
-    history = [comic for comic in history if comic["id"] != comic_id]
-    save_history(history)
-    return {"success": True}
+class ComicGenerationRequest(BaseModel):
+    topic: str = Field(..., description="The user's prompt or story idea")
+    mode: str = Field(default="topic", description="Either 'topic' or 'story'")
+    num_scenes: int = Field(default=0, description="0 = Auto mode. Any positive integer forces exact scenes.")
 
-@router.post("/api/generate")
-async def generate_comic(request: GenerateRequest):
+
+# ==========================================
+# 1. GENERATE (Background Task)
+# ==========================================
+@router.post("/api/generate", tags=["Generation"])
+async def generate_comic_endpoint(request: ComicGenerationRequest, background_tasks: BackgroundTasks):
     """
-    Triggers real ComfyUI image generation!
+    Receives a prompt, PRE-CREATES the database file, starts the background GPU loop, and replies instantly.
     """
     try:
-        # 1. Call ComfyUI to render an image based on the prompt
-        image_url = await generate_image_from_comfy(request.prompt)
+        comic_id = f"comic-{uuid.uuid4().hex[:8]}"
+        display_mode = f"{request.mode.capitalize()} Mode"
+        print(f"\n[API] Received '{request.mode}' request. Assigned ID: {comic_id}")
 
-        # 2. Save result to history
-        history = load_history()
-        new_id = f"comic-{int(time.time())}"
+        # --- THE FIX 1: CREATE THE FILE INSTANTLY SO REACT NEVER 404s ---
+        comic_dir = os.path.join("static", "outputs", comic_id)
+        os.makedirs(comic_dir, exist_ok=True)
+        story_file_path = os.path.join(comic_dir, "story.json")
 
-        new_comic = {
-            "id": new_id,
-            "title": f"Generated: {request.prompt[:20]}...",
-            "date": "Just now",
-            "mode": request.mode.capitalize(),
-            "thumbnail": f"http://127.0.0.1:8000{image_url}",
-            "status": "completed",
+        placeholder_record = {
+            "id": comic_id,
+            "title": "Consulting the AI Director...",
+            "date": datetime.now().strftime("%B %d, %Y"),
+            "mode": display_mode,
+            "thumbnail": "",
+            "status": "generating",
             "isRead": False,
-            "progress": 100,
-            "scenes": [
-                {
-                    "id": 1,
-                    "narration": f"Scene generated for: {request.prompt}",
-                    "imageUrl": f"http://127.0.0.1:8000{image_url}"
-                }
-            ]
+            "progress": 2,
+            "synopsis": "Writing the script and planning panels...",
+            "characters": [],
+            "scenes": []
         }
 
-        history.insert(0, new_comic)
-        save_history(history)
-        return new_comic
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(placeholder_record, f, indent=4)
+
+        # Start the background task now that the file exists safely
+        background_tasks.add_task(
+            generate_full_comic,
+            request.topic,
+            request.mode,
+            request.num_scenes,
+            comic_id
+        )
+
+        return {"message": "Comic generation started", "comic_id": comic_id}
 
     except Exception as e:
-        print(f"[Error] Generation failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        print(f"[API ERROR] {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/api/comic/{comic_id}")
-async def get_comic(comic_id: str):
-    history = load_history()
-    for comic in history:
-        if comic["id"] == comic_id:
-            return comic
-    raise HTTPException(status_code=404, detail="Comic not found")
+
+# ==========================================
+# 2. GET ALL COMICS (History Library)
+# ==========================================
+@router.get("/api/comics", tags=["Library"])
+def get_all_comics():
+    comics = []
+    paths = glob.glob(os.path.join("static", "outputs", "*", "story.json"))
+
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                comics.append({
+                    "id": data.get("id"),
+                    "title": data.get("title", "Untitled Comic"),
+                    "date": data.get("date", ""),
+                    "mode": data.get("mode", "Story Mode"),
+                    "isRead": data.get("isRead", False),
+                    "status": data.get("status"),
+                    "progress": data.get("progress"),
+                    "thumbnail": data.get("thumbnail"),
+                    "thumbnail_status": data.get("thumbnail_status", "idle") # <-- ADD THIS LINE
+                })
+        except Exception:
+            continue
+
+    comics.sort(key=lambda x: x["id"], reverse=True)
+    return {"comics": comics}
+
+# ==========================================
+# 3. GET SINGLE COMIC (Live Polling)
+# ==========================================
+@router.get("/api/comics/{comic_id}", tags=["Library"])
+def get_single_comic(comic_id: str):
+    """Returns the live, progressively updating story.json for a comic."""
+    path = os.path.join("static", "outputs", comic_id, "story.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Comic not found")
+
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ==========================================
+# 4. PAUSE COMIC
+# ==========================================
+@router.post("/api/comics/{comic_id}/pause", tags=["Controls"])
+def pause_comic(comic_id: str):
+    """Flags the JSON so the Orchestrator loop safely stops on its next check."""
+    path = os.path.join("static", "outputs", comic_id, "story.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Comic not found")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if data.get("status") == "generating":
+        data["status"] = "pause_requested"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return {"message": "Pause requested. GPU will stop after current frame."}
+
+    return {"message": "Comic is not currently generating."}
+
+
+# ==========================================
+# 5. RESUME COMIC
+# ==========================================
+@router.post("/api/comics/{comic_id}/resume", tags=["Controls"])
+def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+    """Restarts the GPU background loop for any unrendered panels."""
+    path = os.path.join("static", "outputs", comic_id, "story.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Comic not found")
+
+    background_tasks.add_task(resume_comic, comic_id)
+    return {"message": "Comic generation resumed"}
+
+
+# ==========================================
+# 6. DELETE COMIC
+# ==========================================
+@router.delete("/api/comics/{comic_id}", tags=["Controls"])
+def delete_comic(comic_id: str):
+    """Permanently deletes the comic folder and images."""
+    path = os.path.join("static", "outputs", comic_id, "story.json")
+    dir_path = os.path.join("static", "outputs", comic_id)
+
+    # If the JSON doesn't exist but the folder does, just wipe it instantly
+    if not os.path.exists(path):
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path, ignore_errors=True)
+            return {"message": f"Deleted {comic_id}"}
+        raise HTTPException(status_code=404, detail="Comic not found")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Cooperative Deletion: If generating, tell the loop to kill itself first
+    if data.get("status") == "generating":
+        data["status"] = "delete_requested"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        return {"message": "Deletion requested. Will safely wipe after current frame finishes."}
+
+    # Safe to wipe instantly
+    shutil.rmtree(dir_path, ignore_errors=True)
+    return {"message": f"Deleted {comic_id}"}
+
+# ==========================================
+# 7. REGENERATE THUMBNAIL
+# ==========================================
+@router.post("/api/comics/{comic_id}/thumbnail", tags=["Controls"])
+def regenerate_thumbnail_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+    """Forces the GPU to generate a new cover art thumbnail for the comic."""
+    path = os.path.join("static", "outputs", comic_id, "story.json")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Comic not found")
+
+    # 1. Instantly mark the thumbnail as generating in story.json
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    data["thumbnail_status"] = "generating"
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+    # 2. Add background task
+    background_tasks.add_task(regenerate_thumbnail_task, comic_id)
+    return {"message": "Thumbnail regeneration started."}
