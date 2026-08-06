@@ -31,13 +31,16 @@ class GeneratedStory(BaseModel):
 # STAGE 2: Story Extraction & ComfyUI Data
 # ==========================================
 class StyleConfig(BaseModel):
-    art_style: str = Field(...,
-                           description="Strict comic tags (e.g., 'comic book style, 2d, flat colors, cel shading, heavy inking, masterpiece')")
+    art_style: str = Field(
+        ...,
+        description="Strict comic tags (e.g., 'single panel, cinematic still, 2d, flat colors, cel shading, heavy inking, masterpiece'). NEVER use 'sequential art' or 'comic page'."
+    )
     lighting_and_atmosphere: str = Field(..., description="Atmosphere (e.g., 'dramatic lighting, sharp shadows')")
     color_palette: str = Field(..., description="Key color theme (e.g., 'muted autumn tones')")
-    negative_prompt: str = Field(...,
-                                 description="Crucial for stopping realism (e.g., 'photorealistic, 3d, render, realism, soft shading, lowres')")
-
+    negative_prompt: str = Field(
+        ...,
+        description="Crucial for stopping realism AND grids (e.g., 'multiple panels, grid, split screen, comic page, text, speech bubble, photorealistic, 3d, render')"
+    )
 
 class StoryCharacter(BaseModel):
     id: str = Field(..., description="Stable ID (e.g., 'char_arthur')")

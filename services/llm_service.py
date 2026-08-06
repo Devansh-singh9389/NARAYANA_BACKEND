@@ -30,14 +30,13 @@ def generate_core_story(topic: str, genre: str = "General") -> dict:
         raise ValueError("Gemini API Key is missing! Check your .env file.")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    system_prompt = """You are an expert comic book Director... (Keep your exact prompt here)"""
 
-    # Shortened for brevity, keep your system_prompt exactly as you had it!
+    # FIX 1: Removed the broken variable.
+    # FIX 2: Told Gemini to embrace the Traditional Comic Grid!
     system_prompt = """You are an expert comic book Director and ComfyUI Prompt Engineer. 
-        Take the provided story and break it down exactly into scenes.
+        Take the provided story and break it down into a highly engaging narrative.
         Ensure characters are assigned stable IDs (e.g., 'char_arthur').
-        CRITICAL: If a character ages significantly due to a time skip, create a completely new character entry in the characters array (e.g., 'char_lily_child' and 'char_lily_adult').
-        To prevent realism and maintain a graphic novel aesthetic, ensure the StyleConfig heavily penalizes 3D and realism in the negative_prompt, and enforces '2d, flat colors, comic book style, heavy inking' in the art_style.
+        CRITICAL: We want traditional multi-panel comic pages! Enforce tags like 'sequential art, comic page, multiple panels' in the art_style.
         Every scene MUST explicitly list the characters_present by ID and include Danbooru tags for location, time, camera, emotion, and visual."""
 
     prompt = f"Topic: {topic}\nGenre: {genre}"
@@ -50,9 +49,8 @@ def generate_core_story(topic: str, genre: str = "General") -> dict:
     )
 
     print(f"[Story Engine] Writing {genre} story about: {topic[:50]}...")
-    response = client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt, config=config)
+    response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt, config=config)
 
-    # FIX 1: Use the safe parser
     return parse_json_safely(response.text)
 
 
@@ -63,21 +61,22 @@ def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     if num_scenes > 0:
-        scene_instruction = f"CRITICAL: You MUST generate exactly {num_scenes} scenes in the scenes array. Do not rush the story. Use slow, cinematic pacing to perfectly fill exactly {num_scenes} panels."
+        scene_instruction = f"CRITICAL: You MUST generate exactly {num_scenes} pages in the scenes array. Do not rush the story. Use slow, cinematic pacing to perfectly fill exactly {num_scenes} pages."
     else:
-        scene_instruction = """CRITICAL: AUTO MODE. You must analyze the story and determine the optimal number of scenes. 
-        DO NOT RUSH THE NARRATIVE. For emotional or dramatic stories, use a highly cinematic, slow-paced panel structure (like a manga or graphic novel). 
-        You are free to generate anywhere from 5 to 40 scenes to perfectly capture every micro-expression, environmental transition, and story beat."""
+        scene_instruction = """CRITICAL: AUTO MODE. You must analyze the story and determine the optimal number of pages. 
+        DO NOT RUSH THE NARRATIVE. For emotional or dramatic stories, use a highly cinematic, slow-paced structure. 
+        You are free to generate anywhere from 5 to 40 pages to perfectly capture the story."""
 
+    # FIX 3: Embracing the Grid format here as well!
     system_prompt = f"""You are an expert comic book Director and ComfyUI Prompt Engineer. 
-        Take the provided story and break it down into sequential panels.
+        Take the provided story and break it down into sequential pages.
         {scene_instruction}
         Ensure characters are assigned stable IDs (e.g., 'char_arthur').
-        To prevent realism, ensure the StyleConfig penalizes 3D in the negative_prompt.
-        Every scene MUST explicitly list the characters_present by ID."""
+        CRITICAL: We want traditional multi-panel comic pages! Enforce tags like 'sequential art, comic page, multiple panels, panelling' in the art_style.
+        Every page MUST explicitly list the characters_present by ID."""
 
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-2.5-flash-lite',
         contents=f"Extract visual data for this story: {json.dumps(core_story_dict)}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
@@ -88,5 +87,4 @@ def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
         ),
     )
 
-    # FIX 2: Use the safe parser
     return parse_json_safely(response.text)

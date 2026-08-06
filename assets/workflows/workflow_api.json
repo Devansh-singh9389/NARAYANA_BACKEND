@@ -17,7 +17,7 @@
   },
   "3": {
     "inputs": {
-      "text": "lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, fewer digits, cropped, worst quality, low quality, low score, bad score, average score, signature, watermark, username, blurry, crowded classroom, other people",
+      "text": "single frame, cinematic shot, detailed illustration, graphic novel style, lowres, bad anatomy, bad hands, text, error, missing finger, extra digits, fewer digits, cropped, worst quality, low quality, low score, bad score, average score, signature, watermark, username, blurry, crowded classroom, other people, multiple panels, grid, split screen, comic page, panelling, speech bubble, text, watermark, 3d render, photorealistic, bad anatomy",
       "clip": [
         "1",
         1
