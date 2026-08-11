@@ -24,7 +24,7 @@ def parse_json_safely(text: str) -> dict:
     return json.loads(clean_text)
 
 
-def generate_core_story(topic: str, genre: str = "General") -> dict:
+def generate_core_story(topic: str, genre: str = "General") -> GeneratedStory:
     if not GEMINI_API_KEY:
         raise ValueError("Gemini API Key is missing! Check your .env file.")
 
@@ -50,10 +50,12 @@ def generate_core_story(topic: str, genre: str = "General") -> dict:
     print(f"[Story Engine] Writing {genre} story about: {topic[:50]}...")
     response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt, config=config)
 
-    return parse_json_safely(response.text)
+    if response.parsed:
+        return response.parsed
+    return GeneratedStory.model_validate(parse_json_safely(response.text))
 
 
-def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
+def extract_story_data(core_story: GeneratedStory, num_scenes: int) -> ExtractedStoryData:
     if not GEMINI_API_KEY:
         raise ValueError("Gemini API Key is missing!")
 
@@ -75,7 +77,7 @@ def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
 
     response = client.models.generate_content(
         model='gemini-2.5-flash-lite',
-        contents=f"Extract visual data for this story: {json.dumps(core_story_dict)}",
+        contents=f"Extract visual data for this story: {core_story.model_dump_json()}",
         config=types.GenerateContentConfig(
             system_instruction=system_prompt,
             response_mime_type="application/json",
@@ -85,4 +87,6 @@ def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
         ),
     )
 
-    return parse_json_safely(response.text)
+    if response.parsed:
+        return response.parsed
+    return ExtractedStoryData.model_validate(parse_json_safely(response.text))

@@ -1,9 +1,11 @@
 import os
 import json
 import uuid
+import aiofiles
 import os
 import json
 import uuid
+import aiofiles
 import shutil
 import glob
 from datetime import datetime
@@ -14,6 +16,7 @@ from typing import Optional
 # Import our master Orchestrator
 # Import the new function from orchestrator
 from services.orchestrator import generate_full_comic, resume_comic, regenerate_thumbnail_task
+from services.comfy_service import interrupt_comfy
 
 # Create the router
 router = APIRouter()
@@ -54,8 +57,8 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
             "scenes": []
         }
 
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(placeholder_record, f, indent=4)
+        async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(placeholder_record, indent=4))
 
         # Start the background task now that the file exists safely
         background_tasks.add_task(
@@ -77,14 +80,14 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
 # 2. GET ALL COMICS (History Library)
 # ==========================================
 @router.get("/api/comics", tags=["Library"])
-def get_all_comics():
+async def get_all_comics():
     comics = []
     paths = glob.glob(os.path.join("static", "outputs", "*", "story.json"))
 
     for path in paths:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                data = json.loads(await f.read())
                 comics.append({
                     "id": data.get("id"),
                     "title": data.get("title", "Untitled Comic"),
@@ -106,32 +109,33 @@ def get_all_comics():
 # 3. GET SINGLE COMIC (Live Polling)
 # ==========================================
 @router.get("/api/comics/{comic_id}", tags=["Library"])
-def get_single_comic(comic_id: str):
+async def get_single_comic(comic_id: str):
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
 
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        return json.loads(await f.read())
 
 
 # ==========================================
 # 4. PAUSE COMIC
 # ==========================================
 @router.post("/api/comics/{comic_id}/pause", tags=["Controls"])
-def pause_comic(comic_id: str):
+async def pause_comic(comic_id: str):
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        data = json.loads(await f.read())
 
     if data.get("status") == "generating":
         data["status"] = "pause_requested"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-        return {"message": "Pause requested. GPU will stop after current frame."}
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(data, indent=4))
+        interrupt_comfy()
+        return {"message": "Pause requested. GPU will stop instantly."}
 
     return {"message": "Comic is not currently generating."}
 
@@ -140,7 +144,7 @@ def pause_comic(comic_id: str):
 # 5. RESUME COMIC
 # ==========================================
 @router.post("/api/comics/{comic_id}/resume", tags=["Controls"])
-def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+async def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -153,7 +157,7 @@ def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
 # 6. DELETE COMIC
 # ==========================================
 @router.delete("/api/comics/{comic_id}", tags=["Controls"])
-def delete_comic(comic_id: str):
+async def delete_comic(comic_id: str):
     """Permanently deletes the comic folder and images."""
     path = os.path.join("static", "outputs", comic_id, "story.json")
     dir_path = os.path.join("static", "outputs", comic_id)
@@ -165,15 +169,16 @@ def delete_comic(comic_id: str):
             return {"message": f"Deleted {comic_id}"}
         raise HTTPException(status_code=404, detail="Comic not found")
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        data = json.loads(await f.read())
 
     # Cooperative Deletion: If generating, tell the loop to kill itself first
     if data.get("status") == "generating":
         data["status"] = "delete_requested"
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-        return {"message": "Deletion requested. Will safely wipe after current frame finishes."}
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(data, indent=4))
+        interrupt_comfy()
+        return {"message": "Deletion requested. GPU interrupted."}
 
     # Safe to wipe instantly
     shutil.rmtree(dir_path, ignore_errors=True)
@@ -183,19 +188,19 @@ def delete_comic(comic_id: str):
 # 7. REGENERATE THUMBNAIL
 # ==========================================
 @router.post("/api/comics/{comic_id}/thumbnail", tags=["Controls"])
-def regenerate_thumbnail_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+async def regenerate_thumbnail_endpoint(comic_id: str, background_tasks: BackgroundTasks):
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
 
     # 1. Instantly mark the thumbnail as generating in story.json
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    async with aiofiles.open(path, "r", encoding="utf-8") as f:
+        data = json.loads(await f.read())
 
     data["thumbnail_status"] = "generating"
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(data, indent=4))
 
     # 2. Add background task
     background_tasks.add_task(regenerate_thumbnail_task, comic_id)

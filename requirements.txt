@@ -1,1 +1,4 @@
 pydantic
+aiofiles
+requests
+websockets

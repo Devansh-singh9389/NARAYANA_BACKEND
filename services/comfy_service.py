@@ -13,6 +13,15 @@ OUTPUT_DIR = os.path.join("static", "outputs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
+def interrupt_comfy():
+    try:
+        response = requests.post(f"http://{COMFY_HOST}/interrupt")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[ComfyUI] Failed to interrupt: {e}")
+        return False
+
+
 def find_positive_prompt_node_id(workflow: dict) -> str:
     for node_id, node in workflow.items():
         if isinstance(node, dict) and node.get("class_type") in ["KSampler", "KSamplerAdvanced"]:
@@ -79,6 +88,10 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
                         subfolder = output_images[0].get("subfolder", "")
                         img_type = output_images[0].get("type", "output")
                         break
+                
+                if msg_type in ["execution_error", "error"]:
+                    raise Exception(f"ComfyUI Execution Error: {data}")
+                    
                 if msg_type == "executing" and data.get("node") is None and data.get("prompt_id") == prompt_id:
                     break
 

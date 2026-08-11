@@ -1,11 +1,13 @@
 import os
 import json
+import aiofiles
 import uuid
 import shutil
 import asyncio
 
 from services.llm_service import generate_core_story, extract_story_data
 from services.comfy_service import generate_image_from_comfy
+from models.schemas import GeneratedStory
 
 
 def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> str:
@@ -55,8 +57,8 @@ async def regenerate_thumbnail_task(comic_id: str):
     story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
 
     try:
-        with open(story_file_path, "r", encoding="utf-8") as f:
-            comic_record = json.load(f)
+        async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+            comic_record = json.loads(await f.read())
 
         concept = comic_record.get("thumbnail_concept", comic_record.get("synopsis", "epic comic scene"))
         title = comic_record.get("title", "Comic")
@@ -70,8 +72,8 @@ async def regenerate_thumbnail_task(comic_id: str):
         comic_record["thumbnail"] = image_url
         comic_record["thumbnail_status"] = "completed"  # <-- MARK COMPLETED
 
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
+        async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(comic_record, indent=4))
 
         print(f"[Orchestrator] Thumbnail regenerated successfully!")
 
@@ -79,11 +81,11 @@ async def regenerate_thumbnail_task(comic_id: str):
         print(f"[ORCHESTRATOR ERROR] Failed to regenerate thumbnail: {str(e)}")
         # Reset status if it failed
         if os.path.exists(story_file_path):
-            with open(story_file_path, "r", encoding="utf-8") as f:
-                comic_record = json.load(f)
+            async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+                comic_record = json.loads(await f.read())
             comic_record["thumbnail_status"] = "failed"
-            with open(story_file_path, "w", encoding="utf-8") as f:
-                json.dump(comic_record, f, indent=4)
+            async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(comic_record, indent=4))
 
 
 async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, comic_id: str | None = None) -> dict:
@@ -94,14 +96,14 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
 
     story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
 
-    def save_state():
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
+    async def save_state():
+        async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(comic_record, indent=4))
 
     # Load the placeholder state we instantly created in routes.py
     try:
-        with open(story_file_path, "r", encoding="utf-8") as f:
-            comic_record = json.load(f)
+        async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+            comic_record = json.loads(await f.read())
     except Exception as e:
         print(f"[ORCHESTRATOR ERROR] Failed to load placeholder: {e}")
         return {"status": "failed", "error": "Placeholder missing"}
@@ -109,40 +111,35 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
     try:
         # --- STAGE 1: THE WRITER ---
         if mode == "topic":
-            core_story_obj = await asyncio.to_thread(generate_core_story, prompt, "General")
-            # convert everything in dictionary from whether pydentic or dict
-            core_story = core_story_obj.model_dump() if hasattr(core_story_obj, 'model_dump') else dict(core_story_obj)
-            story_text = core_story.get("full_story", "Story generation failed.")
+            core_story = await asyncio.to_thread(generate_core_story, prompt, "General")
+            story_text = core_story.full_story
         else:
-            core_story = {
-                "title": "Custom Story",
-                "synopsis": "A custom story written by the user.",
-                "thumbnail_concept": "A dramatic comic book cover reflecting the story.",
-                "full_story": prompt
-            }
+            core_story = GeneratedStory(
+                title="Custom Story",
+                synopsis="A custom story written by the user.",
+                full_story=prompt,
+                thumbnail_concept="A dramatic comic book cover reflecting the story."
+            )
             story_text = prompt
 
         # Save the pure text to the text file
-        with open(os.path.join("static", "outputs", comic_id, "story_concept.txt"), 'w', encoding="utf-8") as f:
-            f.write(story_text)
+        async with aiofiles.open(os.path.join("static", "outputs", comic_id, "story_concept.txt"), "w", encoding="utf-8") as f:
+            await f.write(story_text)
 
         # Update JSON progress to show Stage 1 is complete
         comic_record["progress"] = 5
-        comic_record["title"] = core_story.get("title", "Untitled Comic")
-        comic_record["synopsis"] = core_story.get("synopsis", "")
-        comic_record["thumbnail_concept"] = core_story.get("thumbnail_concept", "epic comic book cover")
+        comic_record["title"] = core_story.title
+        comic_record["synopsis"] = core_story.synopsis
+        comic_record["thumbnail_concept"] = core_story.thumbnail_concept
 
-        save_state()
+        await save_state()
 
         # --- STAGE 2: THE DIRECTOR ---
-        extracted_data_obj = await asyncio.to_thread(extract_story_data, core_story, num_scenes)
-        # Apply the safe dictionary fix , just in case Gemini returns an object!
-        extracted_data = extracted_data_obj.model_dump() if hasattr(extracted_data_obj, 'model_dump') else dict(
-            extracted_data_obj)
+        extracted_data = await asyncio.to_thread(extract_story_data, core_story, num_scenes)
 
-        characters = extracted_data.get("characters", [])
-        style_config = extracted_data.get("style_config", {})
-        scenes = extracted_data.get("scenes", [])
+        characters = [c.model_dump() for c in extracted_data.characters]
+        style_config = extracted_data.style_config.model_dump()
+        scenes = [s.model_dump(by_alias=True) for s in extracted_data.scenes]
 
         frontend_scenes = []
         for scene in scenes:
@@ -159,7 +156,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         comic_record["characters"] = characters
         comic_record["scenes"] = frontend_scenes
 
-        save_state()
+        await save_state()
 
         # --- STAGE 3: THE RENDERER (GPU LOOP) ---
         await run_gpu_render_loop(comic_record, story_file_path, comic_id)
@@ -169,7 +166,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         print(f"\n[ORCHESTRATOR ERROR] {str(e)}")
         comic_record["status"] = "failed"
         comic_record["synopsis"] = f"Error during AI generation: {str(e)}"
-        save_state()
+        await save_state()
         return comic_record
 
 
@@ -180,14 +177,14 @@ async def resume_comic(comic_id: str):
         print(f"[Orchestrator] Error: Cannot resume, {comic_id} not found.")
         return
 
-    with open(story_file_path, "r", encoding="utf-8") as f:
-        comic_record = json.load(f)
+    async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+        comic_record = json.loads(await f.read())
 
     print(f"\n=== [ORCHESTRATOR] RESUMING COMIC: {comic_id} ===")
     comic_record["status"] = "generating"
 
-    with open(story_file_path, "w", encoding="utf-8") as f:
-        json.dump(comic_record, f, indent=4)
+    async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(comic_record, indent=4))
 
     # Resume the exact same loop!
     await run_gpu_render_loop(comic_record, story_file_path, comic_id)
@@ -208,8 +205,8 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
             thumb_url = await generate_image_from_comfy(thumb_prompt, comic_id, "thumbnail.png")
             comic_record["thumbnail"] = thumb_url
 
-            with open(story_file_path, "w", encoding="utf-8") as f:
-                json.dump(comic_record, f, indent=4)
+            async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(comic_record, indent=4))
         except Exception as e:
             print(f"[GPU Error] Thumbnail generation failed: {e}")
 
@@ -217,14 +214,14 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
     for index, scene in enumerate(scenes):
         # 1. PRE-RENDER CHECK: Did the user pause or delete before we started?
         try:
-            with open(story_file_path, "r", encoding="utf-8") as f:
-                live_state = json.load(f)
+            async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+                live_state = json.loads(await f.read())
 
             if live_state.get("status") == "pause_requested":
                 print(f"[Orchestrator] Pause requested! Safely stopping {comic_id}.")
                 live_state["status"] = "paused"
-                with open(story_file_path, "w", encoding="utf-8") as f:
-                    json.dump(live_state, f, indent=4)
+                async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+                    await f.write(json.dumps(live_state, indent=4))
                 return  # Kill the loop safely!
 
             elif live_state.get("status") == "delete_requested":
@@ -256,8 +253,8 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
 
         # 2. POST-RENDER CHECK: Did the user hit Pause/Delete WHILE we were rendering?
         try:
-            with open(story_file_path, "r", encoding="utf-8") as f:
-                post_state = json.load(f)
+            async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
+                post_state = json.loads(await f.read())
 
             if post_state.get("status") == "delete_requested":
                 print(f"[Orchestrator] Delete caught post-render! Wiping {comic_id} permanently.")
@@ -270,8 +267,8 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
                 rendered_count = sum(1 for s in post_state["scenes"] if s.get("imageUrl"))
                 post_state["progress"] = int(10 + (rendered_count / len(scenes)) * 90)
                 post_state["status"] = "paused"
-                with open(story_file_path, "w", encoding="utf-8") as f:
-                    json.dump(post_state, f, indent=4)
+                async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+                    await f.write(json.dumps(post_state, indent=4))
                 return
 
         except FileNotFoundError:
@@ -284,8 +281,8 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
         rendered_count = sum(1 for s in comic_record["scenes"] if s.get("imageUrl"))
         comic_record["progress"] = int(10 + (rendered_count / len(scenes)) * 90)
 
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
+        async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(comic_record, indent=4))
 
     # 4. FINALIZE THE COMIC
     comic_record["status"] = "completed"
@@ -293,6 +290,6 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
     if scenes and scenes[0].get("imageUrl"):
         comic_record["thumbnail"] = scenes[0]["imageUrl"]  # fallback if thumb missing
 
-    with open(story_file_path, "w", encoding="utf-8") as f:
-        json.dump(comic_record, f, indent=4)
+    async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+        await f.write(json.dumps(comic_record, indent=4))
     print(f"=== [ORCHESTRATOR] JOB FINISHED! ===")
