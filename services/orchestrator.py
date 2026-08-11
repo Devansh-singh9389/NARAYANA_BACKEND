@@ -11,8 +11,7 @@ from services.comfy_service import generate_image_from_comfy
 def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> str:
     prompt_parts = [
         scene.get("camera", ""),
-        scene.get("location", ""),
-        scene.get("time", ""),
+        scene.get("environment", ""),
         scene.get("emotion", "")
     ]
 
