@@ -3,18 +3,18 @@ import json
 import uuid
 import shutil
 import asyncio
-from datetime import datetime
 
 from services.llm_service import generate_core_story, extract_story_data
 from services.comfy_service import generate_image_from_comfy
 
 
 def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> str:
-    prompt_parts = []
-    prompt_parts.append(scene.get("camera", ""))
-    prompt_parts.append(scene.get("location", ""))
-    prompt_parts.append(scene.get("time", ""))
-    prompt_parts.append(scene.get("emotion", ""))
+    prompt_parts = [
+        scene.get("camera", ""),
+        scene.get("location", ""),
+        scene.get("time", ""),
+        scene.get("emotion", "")
+    ]
 
     characters_present = scene.get("characters_present", [])
     raw_overrides = scene.get("costume_overrides", [])
@@ -87,8 +87,7 @@ async def regenerate_thumbnail_task(comic_id: str):
                 json.dump(comic_record, f, indent=4)
 
 
-async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, comic_id: str = None) -> dict:
-    """The master generation function. Now runs safely in the background with thread safety."""
+async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, comic_id: str | None = None) -> dict:
     print(f"\n=== [ORCHESTRATOR] STARTING COMIC GENERATION ===")
 
     if not comic_id:
@@ -96,19 +95,25 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
 
     story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
 
+    def save_state():
+        with open(story_file_path, "w", encoding="utf-8") as f:
+            json.dump(comic_record, f, indent=4)
+
     # Load the placeholder state we instantly created in routes.py
     try:
         with open(story_file_path, "r", encoding="utf-8") as f:
             comic_record = json.load(f)
     except Exception as e:
         print(f"[ORCHESTRATOR ERROR] Failed to load placeholder: {e}")
-        return
+        return {"status": "failed", "error": "Placeholder missing"}
 
     try:
-        # --- THE FIX 2: RUN SYNCHRONOUS LLM CALLS IN A BACKGROUND THREAD ---
+        # --- STAGE 1: THE WRITER ---
         if mode == "topic":
-            # This prevents the FastAPI server from freezing while Gemini writes!
-            core_story = await asyncio.to_thread(generate_core_story, prompt, "General")
+            core_story_obj = await asyncio.to_thread(generate_core_story, prompt, "General")
+            # convert everything in dictionary from whether pydentic or dict
+            core_story = core_story_obj.model_dump() if hasattr(core_story_obj, 'model_dump') else dict(core_story_obj)
+            story_text = core_story.get("full_story", "Story generation failed.")
         else:
             core_story = {
                 "title": "Custom Story",
@@ -116,18 +121,25 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
                 "thumbnail_concept": "A dramatic comic book cover reflecting the story.",
                 "full_story": prompt
             }
+            story_text = prompt
 
-        # Update progress to show stage 2 has started
+        # Save the pure text to the text file
+        with open(os.path.join("static", "outputs", comic_id, "story_concept.txt"), 'w', encoding="utf-8") as f:
+            f.write(story_text)
+
+        # Update JSON progress to show Stage 1 is complete
         comic_record["progress"] = 5
         comic_record["title"] = core_story.get("title", "Untitled Comic")
         comic_record["synopsis"] = core_story.get("synopsis", "")
         comic_record["thumbnail_concept"] = core_story.get("thumbnail_concept", "epic comic book cover")
 
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
+        save_state()
 
-        # Again, run the synchronous Stage 2 extraction in a background thread
-        extracted_data = await asyncio.to_thread(extract_story_data, core_story, num_scenes)
+        # --- STAGE 2: THE DIRECTOR ---
+        extracted_data_obj = await asyncio.to_thread(extract_story_data, core_story, num_scenes)
+        # Apply the safe dictionary fix , just in case Gemini returns an object!
+        extracted_data = extracted_data_obj.model_dump() if hasattr(extracted_data_obj, 'model_dump') else dict(
+            extracted_data_obj)
 
         characters = extracted_data.get("characters", [])
         style_config = extracted_data.get("style_config", {})
@@ -148,10 +160,9 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         comic_record["characters"] = characters
         comic_record["scenes"] = frontend_scenes
 
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
+        save_state()
 
-        # BEGIN GPU LOOP
+        # --- STAGE 3: THE RENDERER (GPU LOOP) ---
         await run_gpu_render_loop(comic_record, story_file_path, comic_id)
         return comic_record
 
@@ -159,10 +170,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         print(f"\n[ORCHESTRATOR ERROR] {str(e)}")
         comic_record["status"] = "failed"
         comic_record["synopsis"] = f"Error during AI generation: {str(e)}"
-
-        with open(story_file_path, "w", encoding="utf-8") as f:
-            json.dump(comic_record, f, indent=4)
-
+        save_state()
         return comic_record
 
 

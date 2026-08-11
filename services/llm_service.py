@@ -10,9 +10,8 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
-# --- NEW: Bulletproof JSON Cleaner ---
 def parse_json_safely(text: str) -> dict:
-    """Removes markdown formatting that Gemini sometimes adds before parsing JSON."""
+    #Removes markdown formatting that Gemini sometimes adds before parsing JSON.
     clean_text = text.strip()
     if clean_text.startswith("```json"):
         clean_text = clean_text[7:]
@@ -67,7 +66,6 @@ def extract_story_data(core_story_dict: dict, num_scenes: int) -> dict:
         DO NOT RUSH THE NARRATIVE. For emotional or dramatic stories, use a highly cinematic, slow-paced structure. 
         You are free to generate anywhere from 5 to 40 pages to perfectly capture the story."""
 
-    # FIX 3: Embracing the Grid format here as well!
     system_prompt = f"""You are an expert comic book Director and ComfyUI Prompt Engineer. 
         Take the provided story and break it down into sequential pages.
         {scene_instruction}

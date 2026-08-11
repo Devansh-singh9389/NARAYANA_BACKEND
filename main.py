@@ -22,6 +22,7 @@ app.add_middleware(
 os.makedirs(os.path.join("static", "outputs"), exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
 # 3. Include all API routes
 app.include_router(router)
 

@@ -30,15 +30,12 @@ class ComicGenerationRequest(BaseModel):
 # ==========================================
 @router.post("/api/generate", tags=["Generation"])
 async def generate_comic_endpoint(request: ComicGenerationRequest, background_tasks: BackgroundTasks):
-    """
-    Receives a prompt, PRE-CREATES the database file, starts the background GPU loop, and replies instantly.
-    """
     try:
         comic_id = f"comic-{uuid.uuid4().hex[:8]}"
         display_mode = f"{request.mode.capitalize()} Mode"
         print(f"\n[API] Received '{request.mode}' request. Assigned ID: {comic_id}")
 
-        # --- THE FIX 1: CREATE THE FILE INSTANTLY SO REACT NEVER 404s ---
+        # THE FIX 1: CREATE THE FILE INSTANTLY SO REACT NEVER 404s
         comic_dir = os.path.join("static", "outputs", comic_id)
         os.makedirs(comic_dir, exist_ok=True)
         story_file_path = os.path.join(comic_dir, "story.json")
@@ -46,7 +43,7 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
         placeholder_record = {
             "id": comic_id,
             "title": "Consulting the AI Director...",
-            "date": datetime.now().strftime("%B %d, %Y"),
+            "date": datetime.now().strftime("%B %d, %Y %I:%M %p"),
             "mode": display_mode,
             "thumbnail": "",
             "status": "generating",
@@ -97,7 +94,7 @@ def get_all_comics():
                     "status": data.get("status"),
                     "progress": data.get("progress"),
                     "thumbnail": data.get("thumbnail"),
-                    "thumbnail_status": data.get("thumbnail_status", "idle") # <-- ADD THIS LINE
+                    "thumbnail_status": data.get("thumbnail_status", "idle")
                 })
         except Exception:
             continue
@@ -110,7 +107,6 @@ def get_all_comics():
 # ==========================================
 @router.get("/api/comics/{comic_id}", tags=["Library"])
 def get_single_comic(comic_id: str):
-    """Returns the live, progressively updating story.json for a comic."""
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -124,7 +120,6 @@ def get_single_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/pause", tags=["Controls"])
 def pause_comic(comic_id: str):
-    """Flags the JSON so the Orchestrator loop safely stops on its next check."""
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -146,7 +141,6 @@ def pause_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/resume", tags=["Controls"])
 def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
-    """Restarts the GPU background loop for any unrendered panels."""
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -164,7 +158,7 @@ def delete_comic(comic_id: str):
     path = os.path.join("static", "outputs", comic_id, "story.json")
     dir_path = os.path.join("static", "outputs", comic_id)
 
-    # If the JSON doesn't exist but the folder does, just wipe it instantly
+    # if the JSON does not  exist but the folder does, just wipe it out
     if not os.path.exists(path):
         if os.path.exists(dir_path):
             shutil.rmtree(dir_path, ignore_errors=True)
@@ -190,7 +184,6 @@ def delete_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/thumbnail", tags=["Controls"])
 def regenerate_thumbnail_endpoint(comic_id: str, background_tasks: BackgroundTasks):
-    """Forces the GPU to generate a new cover art thumbnail for the comic."""
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
