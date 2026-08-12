@@ -10,7 +10,48 @@ from services.comfy_service import generate_image_from_comfy
 from models.schemas import GeneratedStory
 
 
-def build_runtime_prompt(scene: dict, characters: list, style_config: dict) -> str:
+def build_runtime_prompt(scene: dict, characters: list, style_config: dict, render_model: str = "sdxl") -> str:
+    if render_model == "flux":
+        prompt_text = scene.get("visual", "")
+        
+        characters_present = scene.get("characters_present", [])
+        raw_overrides = scene.get("costume_overrides", [])
+        
+        override_dict = {}
+        for item in raw_overrides:
+            if "character_id" in item:
+                override_dict[item["character_id"]] = {
+                    "body": item.get("body_override"),
+                    "tags": item.get("tags", "")
+                }
+                
+        for char_id in characters_present:
+            char_data = next((c for c in characters if c.get("id") == char_id), None)
+            if not char_data:
+                continue
+                
+            desc_parts = []
+            if char_id in override_dict and override_dict[char_id]["body"]:
+                desc_parts.append(override_dict[char_id]["body"])
+            else:
+                desc_parts.append(char_data.get("base_body_tags", ""))
+                desc_parts.append(char_data.get("distinctive_features", ""))
+                
+            if char_id in override_dict:
+                desc_parts.append(override_dict[char_id]["tags"])
+            else:
+                desc_parts.append(char_data.get("default_outfit_tags", ""))
+                
+            clean_desc = ", ".join([p.strip() for p in desc_parts if p and p.strip()])
+            
+            prompt_text = prompt_text.replace(char_id, f"person ({clean_desc})")
+            
+        flux_style = style_config.get("flux_style_description", "")
+        if flux_style:
+            prompt_text = f"{prompt_text} {flux_style}"
+            
+        return prompt_text.strip()
+
     prompt_parts = [
         scene.get("camera", ""),
         scene.get("environment", ""),
@@ -66,7 +107,8 @@ async def regenerate_thumbnail_task(comic_id: str):
         prompt = f"comic book cover art, Title: {title}, {concept}, masterpiece, highly detailed, dramatic lighting, vibrant, graphic novel cover"
 
         # Generate image via ComfyUI
-        image_url = await generate_image_from_comfy(prompt, comic_id, "thumbnail.png")
+        render_model = comic_record.get("render_model", "sdxl")
+        image_url = await generate_image_from_comfy(prompt, comic_id, "thumbnail.png", render_model=render_model)
 
         # Save to DB and mark completed
         comic_record["thumbnail"] = image_url
@@ -88,7 +130,7 @@ async def regenerate_thumbnail_task(comic_id: str):
                 await f.write(json.dumps(comic_record, indent=4))
 
 
-async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, comic_id: str | None = None) -> dict:
+async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int = 0, render_model: str = "sdxl", comic_id: str | None = None) -> dict:
     print(f"\n=== [ORCHESTRATOR] STARTING COMIC GENERATION ===")
 
     if not comic_id:
@@ -148,7 +190,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
                 scene_data["id"] = scene_data.pop("scene_number")
 
             scene_data["imageUrl"] = None
-            scene_data["imagePrompt"] = build_runtime_prompt(scene, characters, style_config)
+            scene_data["imagePrompt"] = build_runtime_prompt(scene, characters, style_config, render_model)
             frontend_scenes.append(scene_data)
 
         # UPDATE FILE WITH FULL STORY DATA BEFORE GPU LOOP
@@ -202,7 +244,7 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
             title = comic_record.get("title", "Comic")
             thumb_prompt = f"comic book cover art, Title: {title}, {concept}, masterpiece, highly detailed, dramatic lighting, vibrant colors, graphic novel cover"
 
-            thumb_url = await generate_image_from_comfy(thumb_prompt, comic_id, "thumbnail.png")
+            thumb_url = await generate_image_from_comfy(thumb_prompt, comic_id, "thumbnail.png", render_model=comic_record.get("render_model", "sdxl"))
             comic_record["thumbnail"] = thumb_url
 
             async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
@@ -245,7 +287,7 @@ async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id
             image_url = await generate_image_from_comfy(
                 prompt_text=final_prompt,
                 comic_id=comic_id,
-                filename=f"scene_{scene_num}.png"   # <--- changed
+                filename=f"scene_{scene_num}.png", render_model=comic_record.get("render_model", "sdxl")
             )
         except Exception as e:
             print(f"     [Error] Panel {scene_num} failed: {e}")

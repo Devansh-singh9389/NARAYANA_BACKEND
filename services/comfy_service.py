@@ -7,7 +7,6 @@ import asyncio
 import random
 
 COMFY_HOST = "127.0.0.1:8188"
-WORKFLOW_PATH = os.path.join("assets", "workflows", "workflow_api.json")
 OUTPUT_DIR = os.path.join("static", "outputs")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -36,15 +35,18 @@ def find_positive_prompt_node_id(workflow: dict) -> str:
     raise ValueError("Could not find a valid positive prompt node.")
 
 
-async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: str) -> str:
+async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: str, render_model: str = "sdxl") -> str:
     """
     Commands ComfyUI to generate an image, then downloads it directly into
     our backend's static folder neatly organized by comic_id and filename.
     """
-    if not os.path.exists(WORKFLOW_PATH):
-        raise FileNotFoundError(f"Workflow file not found at {WORKFLOW_PATH}")
+    workflow_filename = "workflow_flux.json" if render_model == "flux" else "workflow_sdxl.json"
+    workflow_path = os.path.join("assets", "workflows", workflow_filename)
 
-    with open(WORKFLOW_PATH, "r", encoding="utf-8") as f:
+    if not os.path.exists(workflow_path):
+        raise FileNotFoundError(f"Workflow file not found at {workflow_path}")
+
+    with open(workflow_path, "r", encoding="utf-8") as f:
         workflow = json.load(f)
 
     pos_node_id = find_positive_prompt_node_id(workflow)

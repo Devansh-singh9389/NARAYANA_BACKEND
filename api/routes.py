@@ -26,6 +26,7 @@ class ComicGenerationRequest(BaseModel):
     topic: str = Field(..., description="The user's prompt or story idea")
     mode: str = Field(default="topic", description="Either 'topic' or 'story'")
     num_scenes: int = Field(default=0, description="0 = Auto mode. Any positive integer forces exact scenes.")
+    render_model: str = Field(default="sdxl", description="Either 'sdxl' or 'flux'")
 
 
 # ==========================================
@@ -48,6 +49,7 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
             "title": "Consulting the AI Director...",
             "date": datetime.now().strftime("%B %d, %Y %I:%M %p"),
             "mode": display_mode,
+            "render_model": request.render_model,
             "thumbnail": "",
             "status": "generating",
             "isRead": False,
@@ -66,6 +68,7 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
             request.topic,
             request.mode,
             request.num_scenes,
+            request.render_model,
             comic_id
         )
 
@@ -96,6 +99,7 @@ async def get_all_comics():
                     "isRead": data.get("isRead", False),
                     "status": data.get("status"),
                     "progress": data.get("progress"),
+                    "render_model": data.get("render_model", "sdxl"),
                     "thumbnail": data.get("thumbnail"),
                     "thumbnail_status": data.get("thumbnail_status", "idle")
                 })
