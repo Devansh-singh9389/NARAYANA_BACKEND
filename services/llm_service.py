@@ -7,7 +7,14 @@ from dotenv import load_dotenv
 from models.schemas import GeneratedStory, ExtractedStoryData
 
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+def get_gemini_api_key() -> str:
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        load_dotenv(override=True)
+        key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise ValueError("Gemini API Key is missing! Check your .env file.")
+    return key
 
 
 def parse_json_safely(text: str) -> dict:
@@ -25,10 +32,8 @@ def parse_json_safely(text: str) -> dict:
 
 
 def generate_core_story(topic: str, genre: str = "General") -> GeneratedStory:
-    if not GEMINI_API_KEY:
-        raise ValueError("Gemini API Key is missing! Check your .env file.")
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    api_key = get_gemini_api_key()
+    client = genai.Client(api_key=api_key)
 
     # FIX 1: Removed the broken variable.
     # FIX 2: Told Gemini to embrace the Traditional Comic Grid!
@@ -48,7 +53,7 @@ def generate_core_story(topic: str, genre: str = "General") -> GeneratedStory:
     )
 
     print(f"[Story Engine] Writing {genre} story about: {topic[:50]}...")
-    response = client.models.generate_content(model='gemini-3.6-flash', contents=prompt, config=config)
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=config)
 
     if response.parsed:
         return response.parsed
@@ -56,10 +61,8 @@ def generate_core_story(topic: str, genre: str = "General") -> GeneratedStory:
 
 
 def extract_story_data(core_story: GeneratedStory, num_scenes: int) -> ExtractedStoryData:
-    if not GEMINI_API_KEY:
-        raise ValueError("Gemini API Key is missing!")
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    api_key = get_gemini_api_key()
+    client = genai.Client(api_key=api_key)
 
     if num_scenes > 0:
         scene_instruction = f"CRITICAL: You MUST generate exactly {num_scenes} pages in the scenes array. Do not rush the story. Use slow, cinematic pacing to perfectly fill exactly {num_scenes} pages."

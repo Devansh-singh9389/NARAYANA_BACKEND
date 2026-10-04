@@ -1,10 +1,7 @@
 import os
 import json
 import uuid
-import aiofiles
-import os
-import json
-import uuid
+import re
 import aiofiles
 import shutil
 import glob
@@ -20,6 +17,14 @@ from services.comfy_service import interrupt_comfy
 
 # Create the router
 router = APIRouter()
+
+_COMIC_ID_RE = re.compile(r'^comic-[a-f0-9]{8}$')
+
+def _validate_comic_id(comic_id: str) -> str:
+    """Reject path-traversal attempts by enforcing strict comic ID format."""
+    if not _COMIC_ID_RE.match(comic_id):
+        raise HTTPException(status_code=400, detail="Invalid comic ID format.")
+    return comic_id
 
 
 class ComicGenerationRequest(BaseModel):
@@ -49,6 +54,9 @@ async def generate_comic_endpoint(request: ComicGenerationRequest, background_ta
             "title": "Consulting the AI Director...",
             "date": datetime.now().strftime("%B %d, %Y %I:%M %p"),
             "mode": display_mode,
+            "raw_mode": request.mode,
+            "prompt": request.topic,
+            "num_scenes": request.num_scenes,
             "render_model": request.render_model,
             "thumbnail": "",
             "status": "generating",
@@ -114,6 +122,7 @@ async def get_all_comics():
 # ==========================================
 @router.get("/api/comics/{comic_id}", tags=["Library"])
 async def get_single_comic(comic_id: str):
+    _validate_comic_id(comic_id)
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -127,6 +136,7 @@ async def get_single_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/pause", tags=["Controls"])
 async def pause_comic(comic_id: str):
+    _validate_comic_id(comic_id)
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -138,7 +148,7 @@ async def pause_comic(comic_id: str):
         data["status"] = "pause_requested"
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(data, indent=4))
-        interrupt_comfy()
+        await interrupt_comfy()
         return {"message": "Pause requested. GPU will stop instantly."}
 
     return {"message": "Comic is not currently generating."}
@@ -149,6 +159,7 @@ async def pause_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/resume", tags=["Controls"])
 async def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+    _validate_comic_id(comic_id)
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")
@@ -163,6 +174,7 @@ async def resume_comic_endpoint(comic_id: str, background_tasks: BackgroundTasks
 @router.delete("/api/comics/{comic_id}", tags=["Controls"])
 async def delete_comic(comic_id: str):
     """Permanently deletes the comic folder and images."""
+    _validate_comic_id(comic_id)
     path = os.path.join("static", "outputs", comic_id, "story.json")
     dir_path = os.path.join("static", "outputs", comic_id)
 
@@ -181,7 +193,7 @@ async def delete_comic(comic_id: str):
         data["status"] = "delete_requested"
         async with aiofiles.open(path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(data, indent=4))
-        interrupt_comfy()
+        await interrupt_comfy()
         return {"message": "Deletion requested. GPU interrupted."}
 
     # Safe to wipe instantly
@@ -193,6 +205,7 @@ async def delete_comic(comic_id: str):
 # ==========================================
 @router.post("/api/comics/{comic_id}/thumbnail", tags=["Controls"])
 async def regenerate_thumbnail_endpoint(comic_id: str, background_tasks: BackgroundTasks):
+    _validate_comic_id(comic_id)
     path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Comic not found")

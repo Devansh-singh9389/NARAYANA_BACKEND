@@ -1,21 +1,23 @@
 import json
 import os
 import uuid
-import requests
+import httpx
 import websockets
 import asyncio
 import random
+import aiofiles
 
-COMFY_HOST = "127.0.0.1:8188"
+COMFY_HOST = os.getenv("COMFY_HOST", "127.0.0.1:8188")
 OUTPUT_DIR = os.path.join("static", "outputs")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-def interrupt_comfy():
+async def interrupt_comfy():
     try:
-        response = requests.post(f"http://{COMFY_HOST}/interrupt")
-        return response.status_code == 200
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"http://{COMFY_HOST}/interrupt")
+            return response.status_code == 200
     except Exception as e:
         print(f"[ComfyUI] Failed to interrupt: {e}")
         return False
@@ -64,7 +66,8 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
     client_id = str(uuid.uuid4())
     payload = {"prompt": workflow, "client_id": client_id}
 
-    response = requests.post(f"http://{COMFY_HOST}/prompt", json=payload)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"http://{COMFY_HOST}/prompt", json=payload)
     if response.status_code != 200:
         raise Exception(f"ComfyUI Error ({response.status_code}): {response.text}")
 
@@ -77,7 +80,7 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
 
     async with websockets.connect(ws_url) as ws:
         while True:
-            out = await ws.recv()
+            out = await asyncio.wait_for(ws.recv(), timeout=600)
             if isinstance(out, str):
                 message = json.loads(out)
                 msg_type = message.get("type")
@@ -100,10 +103,11 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
     if not saved_filename:
         raise Exception("No output image filename was captured.")
 
-    img_response = requests.get(
-        f"http://{COMFY_HOST}/view",
-        params={"filename": saved_filename, "subfolder": subfolder, "type": img_type}
-    )
+    async with httpx.AsyncClient() as client:
+        img_response = await client.get(
+            f"http://{COMFY_HOST}/view",
+            params={"filename": saved_filename, "subfolder": subfolder, "type": img_type}
+        )
 
     if img_response.status_code != 200:
         raise Exception("Failed to retrieve the generated image from ComfyUI.")
@@ -114,8 +118,8 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
 
     local_image_path = os.path.join(comic_dir, filename)
 
-    with open(local_image_path, "wb") as f:
-        f.write(img_response.content)
+    async with aiofiles.open(local_image_path, "wb") as f:
+        await f.write(img_response.content)
 
     print(f"[ComfyUI] Saved image to {local_image_path}")
 

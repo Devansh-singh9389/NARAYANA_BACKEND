@@ -150,6 +150,11 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
         print(f"[ORCHESTRATOR ERROR] Failed to load placeholder: {e}")
         return {"status": "failed", "error": "Placeholder missing"}
 
+    comic_record["prompt"] = prompt
+    comic_record["raw_mode"] = mode
+    comic_record["num_scenes"] = num_scenes
+    comic_record["render_model"] = render_model
+
     try:
         # --- STAGE 1: THE WRITER ---
         if mode == "topic":
@@ -213,7 +218,7 @@ async def generate_full_comic(prompt: str, mode: str = "topic", num_scenes: int 
 
 
 async def resume_comic(comic_id: str):
-    """Bypasses the LLM and instantly restarts the GPU loop for missing images."""
+    """Restarts generation: runs full LLM pipeline if scenes are missing, or restarts GPU loop for missing images."""
     story_file_path = os.path.join("static", "outputs", comic_id, "story.json")
     if not os.path.exists(story_file_path):
         print(f"[Orchestrator] Error: Cannot resume, {comic_id} not found.")
@@ -221,6 +226,34 @@ async def resume_comic(comic_id: str):
 
     async with aiofiles.open(story_file_path, "r", encoding="utf-8") as f:
         comic_record = json.loads(await f.read())
+
+    scenes = comic_record.get("scenes", [])
+
+    # If the story was interrupted before scenes were generated, re-run full pipeline!
+    if not scenes:
+        prompt = comic_record.get("prompt")
+        concept_path = os.path.join("static", "outputs", comic_id, "story_concept.txt")
+        if not prompt and os.path.exists(concept_path):
+            try:
+                async with aiofiles.open(concept_path, "r", encoding="utf-8") as f:
+                    prompt = (await f.read()).strip()
+            except Exception:
+                pass
+
+        if prompt:
+            print(f"\n=== [ORCHESTRATOR] RESUMING FULL PIPELINE (NO SCENES FOUND): {comic_id} ===")
+            raw_mode = comic_record.get("raw_mode", "topic" if "topic" in comic_record.get("mode", "").lower() else "story")
+            num_scenes = comic_record.get("num_scenes", 0)
+            render_model = comic_record.get("render_model", "sdxl")
+            await generate_full_comic(prompt, raw_mode, num_scenes, render_model, comic_id)
+            return
+        else:
+            comic_record["status"] = "failed"
+            comic_record["synopsis"] = "Cannot resume: No scenes or original prompt found. Please create a new comic from the Home page."
+            async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+                await f.write(json.dumps(comic_record, indent=4))
+            print(f"[Orchestrator] Cannot resume {comic_id}: no prompt or scenes found.")
+            return
 
     print(f"\n=== [ORCHESTRATOR] RESUMING COMIC: {comic_id} ===")
     comic_record["status"] = "generating"
@@ -235,6 +268,15 @@ async def resume_comic(comic_id: str):
 async def run_gpu_render_loop(comic_record: dict, story_file_path: str, comic_id: str):
     """The shared loop used by both Generate and Resume, featuring Pause & Delete detection."""
     scenes = comic_record.get("scenes", [])
+
+    if not scenes:
+        comic_record["status"] = "failed"
+        if not comic_record.get("synopsis") or "Error" not in comic_record.get("synopsis", ""):
+            comic_record["synopsis"] = "No scenes were generated."
+        async with aiofiles.open(story_file_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(comic_record, indent=4))
+        print(f"[Orchestrator] No scenes to render for {comic_id}.")
+        return
 
     # --- 1. GENERATE COVER THUMBNAIL FIRST (if missing) ---
     if not comic_record.get("thumbnail"):

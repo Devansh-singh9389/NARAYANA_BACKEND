@@ -1,4 +1,8 @@
+fastapi
+uvicorn[standard]
 pydantic
 aiofiles
-requests
+httpx
 websockets
+google-genai
+python-dotenv
