@@ -112,11 +112,11 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
     if img_response.status_code != 200:
         raise Exception("Failed to retrieve the generated image from ComfyUI.")
 
-    # --- SAVE WITH CUSTOM FILENAME ---
-    comic_dir = os.path.join(OUTPUT_DIR, comic_id)
-    os.makedirs(comic_dir, exist_ok=True)
+    # --- SAVE WITH CUSTOM FILENAME INTO MODEL SUBFOLDER ---
+    model_dir = os.path.join(OUTPUT_DIR, comic_id, render_model)
+    os.makedirs(model_dir, exist_ok=True)
 
-    local_image_path = os.path.join(comic_dir, filename)
+    local_image_path = os.path.join(model_dir, filename)
 
     async with aiofiles.open(local_image_path, "wb") as f:
         await f.write(img_response.content)
@@ -124,4 +124,4 @@ async def generate_image_from_comfy(prompt_text: str, comic_id: str, filename: s
     print(f"[ComfyUI] Saved image to {local_image_path}")
 
     # Return the relative URL for the frontend
-    return f"/static/outputs/{comic_id}/{filename}"
+    return f"/static/outputs/{comic_id}/{render_model}/{filename}"

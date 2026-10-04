@@ -35,5 +35,11 @@ def health_check():
     return {"status": "online", "message": "PanelForge Backend is ready."}
 
 
+# 4. Mount the built React Frontend (1-Click Single Server mode)
+frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "NARAYANA_FRONTEND", "dist"))
+if os.path.exists(frontend_dist):
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
